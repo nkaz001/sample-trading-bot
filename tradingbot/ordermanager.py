@@ -146,8 +146,12 @@ class OrderManager:
             def signal_handler():
                 ioloop.create_task(stop())
 
-            ioloop.add_signal_handler(signal.SIGTERM, signal_handler)
-            ioloop.add_signal_handler(signal.SIGINT, signal_handler)
+            try:
+                ioloop.add_signal_handler(signal.SIGTERM, signal_handler)
+                ioloop.add_signal_handler(signal.SIGINT, signal_handler)
+            except NotImplementedError:
+                # add_signal_handler supports only Linux-compatible OS.
+                pass
             ioloop.run_until_complete(start())
         except RuntimeError as e:
             if e.args[0] != 'Event loop stopped before Future completed.':
