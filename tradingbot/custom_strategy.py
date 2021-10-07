@@ -32,6 +32,9 @@ class CustomOrderManager(OrderManager):
         try:
             order_qty = order_qty_dollar / float(self.binance_futures.last_price)
 
+            logging.info('buy=%f, sell=%f, alpha=%f, threshold=%f, last=%f, order_qty=%f', buy, sell, alpha, threshold,
+                         float(self.binance_futures.last_price), order_qty)
+
             if alpha > threshold and not self.long_position_limit_exceeded():
                 buy_orders.append({'price': bid['price'][0], 'quantity': order_qty, 'side': "Buy"})
             if alpha < -threshold and not self.short_position_limit_exceeded():
