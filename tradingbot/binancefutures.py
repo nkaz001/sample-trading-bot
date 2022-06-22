@@ -14,7 +14,7 @@ from yarl import URL
 
 
 class BinanceFutures:
-    def __init__(self, api_key, api_secret, symbol='btcusdt', testnet=True, orderIDPrefix='bot_bf_', postOnly=False, timeout=7):
+    def __init__(self, api_key, api_secret, symbol='btcusdt', testnet=True, orderIDPrefix='bot_bf_', postOnly=False, timeout=10):
         self.api_key = api_key
         self.api_secret = api_secret
         self.symbol = symbol
@@ -28,6 +28,7 @@ class BinanceFutures:
         self.postOnly = postOnly
         self.orderIDPrefix = orderIDPrefix
         self.last_price = 0
+        self.open_orders_ws = {}
 
     async def __on_message(self, message):
         message = json.loads(message)
@@ -47,21 +48,24 @@ class BinanceFutures:
                     if 'BOTH' == position_side:
                         if position['s'].upper() == self.symbol.upper():
                             self.running_qty = position['pa']
-        #     elif e == 'ORDER_TRADE_UPDATE':
-        #         timestamp = data['E']
-        #         order = data['o']
-        #         order = {
-        #             'symbol': order['s'],
-        #             'clientOrderId': order['c'],
-        #             'side': order['S'],
-        #             'origQty': order['q'],
-        #             'price': order['p'],
-        #             'status': order['X'],
-        #             'orderId': order['i'],
-        #             'executedQty': order['l'],
-        #             'cumQty': order['z'],
-        #             'updateTime': order['T']
-        #         }
+            elif e == 'ORDER_TRADE_UPDATE':
+                timestamp = data['E']
+                order = data['o']
+                self.open_orders_ws[order['c']] = {
+                    'symbol': order['s'],
+                    'clientOrderId': order['c'],
+                    'side': order['S'],
+                    'origQty': order['q'],
+                    'price': order['p'],
+                    'status': order['X'],
+                    'orderId': order['i'],
+                    'executedQty': order['l'],
+                    'cumQty': order['z'],
+                    'updateTime': order['T']
+                }
+                for order_id, order in list(self.open_orders_ws.items()):
+                    if order['status'] not in ['PENDING_NEW', 'NEW', 'PARTIALLY_FILLED']:
+                        del self.open_orders_ws[order_id]
         elif stream == '%s@depth@0ms' % self.symbol:
             data = message['data']
             u = data['u']
@@ -202,7 +206,7 @@ class BinanceFutures:
             return await retry()
 
         except aiohttp.ClientConnectionError as e:
-            logging.warning("Unable to contact the Binance Futures API (%s). Please check the URL. Retrying. " + "Request: %s %s \n %s" % (e, url, json.dumps(query)))
+            logging.warning("Unable to contact the Binance Futures API (%s). Please check the URL. Retrying. Request: %s \n %s" % (e, url, json.dumps(query)))
             await asyncio.sleep(1)
             return await retry()
 
@@ -224,6 +228,11 @@ class BinanceFutures:
                 order['timeInForce'] = 'GTX'
             else:
                 order['timeInForce'] = 'GTC'
+            pending_order = order.copy()
+            pending_order['status'] = 'PENDING_NEW'
+            pending_order['clientOrderId'] = order['newClientOrderId']
+            self.open_orders_ws[order['newClientOrderId']] = pending_order
+
         return await self.__curl_binancefutures(verb='POST', path='/v1/batchOrders', query={'batchOrders': orders})
 
     async def cancel_bulk_orders(self, orderIdList):
@@ -292,8 +301,10 @@ class BinanceFutures:
                 asyncio.create_task(self.connect())
 
     async def close(self):
+        await self.cancel_all_orders()
         self.closed = True
-        await self.ws.close()
+        if self.ws is not None:
+            await self.ws.close()
         await self.client.close()
         await asyncio.sleep(1)
 
@@ -331,4 +342,4 @@ class BinanceFutures:
             if self.prev_u is None:
                 await asyncio.sleep(0.5)
         self.pending_messages = None
-        logging.warning('The book has been initialized. symbol=%s, prev_update_id=%d' % (self.symbol, self.prev_u))
+        logging.warning('The book is initialized. symbol=%s, prev_update_id=%d' % (self.symbol, self.prev_u))
