@@ -104,7 +104,7 @@ class BinanceFutures:
             except:
                 pass
 
-    async def __curl_binancefutures(self, path, query=None, timeout=None, verb=None, rethrow_errors=None, max_retries=None):
+    async def __curl_binancefutures(self, path, query=None, timeout=None, verb=None, rethrow_errors=True, max_retries=None):
         if timeout is None:
             timeout = self.timeout
 
@@ -212,13 +212,13 @@ class BinanceFutures:
 
         # Reset retry counter on success
         self.retries = 0
-
         return await response.json()
 
     async def create_bulk_orders(self, orders):
         """Create multiple orders."""
         if len(orders) > 5:
             raise Exception('The number of orders cannot exceed 5.')
+        pending_orders = []
         for order in orders:
             order['newClientOrderId'] = self.orderIDPrefix + base64.b64encode(uuid.uuid4().bytes).decode('utf8').replace('+', '').replace('/', '').rstrip('=\n')
             order['symbol'] = self.symbol
@@ -232,13 +232,23 @@ class BinanceFutures:
             pending_order['status'] = 'PENDING_NEW'
             pending_order['clientOrderId'] = order['newClientOrderId']
             self.open_orders_ws[order['newClientOrderId']] = pending_order
-
-        return await self.__curl_binancefutures(verb='POST', path='/v1/batchOrders', query={'batchOrders': orders})
+            pending_orders.append(pending_order)
+        try:
+            return await self.__curl_binancefutures(verb='POST', path='/v1/batchOrders', query={'batchOrders': orders},
+                                                    max_retries=0)
+        except (aiohttp.ClientResponseError, aiohttp.ClientConnectionError, asyncio.TimeoutError):
+            for pending_order in pending_orders:
+                order = self.open_orders_ws.get(pending_order['newClientOrderId'])
+                if order is not None and order['status'] == 'PENDING_NEW':
+                    del self.open_orders_ws[pending_order['newClientOrderId']]
+            raise
 
     async def cancel_bulk_orders(self, orderIdList):
         if len(orderIdList) > 10:
             raise Exception('The number of orders cannot exceed 10.')
-        return await self.__curl_binancefutures(verb='DELETE', path='/v1/batchOrders', query={'symbol': self.symbol, 'orderIdList': orderIdList})
+        return await self.__curl_binancefutures(verb='DELETE', path='/v1/batchOrders',
+                                                query={'symbol': self.symbol, 'orderIdList': orderIdList},
+                                                max_retries=0)
 
     async def cancel_all_orders(self):
         return await self.__curl_binancefutures(verb='DELETE', path='/v1/allOpenOrders', query={'symbol': self.symbol})

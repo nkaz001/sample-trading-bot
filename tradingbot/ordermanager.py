@@ -81,7 +81,7 @@ class OrderManager:
             cancel_task = []
             while to_cancel:
                 to_cancel_bulk = []
-                while to_cancel and len(to_cancel_bulk) < 5:
+                while to_cancel and len(to_cancel_bulk) < 10:
                     to_cancel_bulk.append(to_cancel.pop(0))
                 cancel_task.append(self.binance_futures.cancel_bulk_orders([x['orderId'] for x in to_cancel_bulk]))
             response = await asyncio.gather(*cancel_task)
