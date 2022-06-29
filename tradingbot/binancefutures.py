@@ -234,8 +234,16 @@ class BinanceFutures:
             self.open_orders_ws[order['newClientOrderId']] = pending_order
             pending_orders.append(pending_order)
         try:
-            return await self.__curl_binancefutures(verb='POST', path='/v1/batchOrders', query={'batchOrders': orders},
+            resp = await self.__curl_binancefutures(verb='POST', path='/v1/batchOrders', query={'batchOrders': orders},
                                                     max_retries=0)
+            for item in resp:
+                order_id = item['clientOrderId']
+                order = self.open_orders_ws.get(order_id)
+                if order is not None:
+                    order.update(item)
+                    if order['status'] not in ['PENDING_NEW', 'NEW', 'PARTIALLY_FILLED']:
+                        del self.open_orders_ws[order_id]
+            return resp
         except (aiohttp.ClientResponseError, aiohttp.ClientConnectionError, asyncio.TimeoutError):
             for pending_order in pending_orders:
                 order = self.open_orders_ws.get(pending_order['newClientOrderId'])
@@ -246,12 +254,25 @@ class BinanceFutures:
     async def cancel_bulk_orders(self, orderIdList):
         if len(orderIdList) > 10:
             raise Exception('The number of orders cannot exceed 10.')
-        return await self.__curl_binancefutures(verb='DELETE', path='/v1/batchOrders',
+        resp = await self.__curl_binancefutures(verb='DELETE', path='/v1/batchOrders',
                                                 query={'symbol': self.symbol, 'orderIdList': orderIdList},
                                                 max_retries=0)
+        for item in resp:
+            order_id = item['clientOrderId']
+            order = self.open_orders_ws.get(order_id)
+            if order is not None:
+                order.update(item)
+                if order['status'] not in ['PENDING_NEW', 'NEW', 'PARTIALLY_FILLED']:
+                    del self.open_orders_ws[order_id]
+        return resp
 
     async def cancel_all_orders(self):
-        return await self.__curl_binancefutures(verb='DELETE', path='/v1/allOpenOrders', query={'symbol': self.symbol})
+        resp = await self.__curl_binancefutures(verb='DELETE', path='/v1/allOpenOrders', query={'symbol': self.symbol})
+        if resp['code'] == '200':
+            for order_id, order in list(self.open_orders_ws.items()):
+                if order['status'] != 'PENDING_NEW':
+                    del self.open_orders_ws[order_id]
+        return resp
 
     async def open_orders(self):
         return await self.__curl_binancefutures(verb='GET', path='/v1/openOrders')
