@@ -72,7 +72,7 @@ class BinanceFutures:
                 now = time.time()
                 for order_id, order in list(self.open_orders_ws.items()):
                     if order['status'] not in ['PENDING_NEW', 'NEW', 'PARTIALLY_FILLED'] \
-                            and order['updateTime'] < now - 300:
+                            and order['updateTime'] < (now - 300) * 1000:
                         del self.open_orders_ws[order_id]
         elif stream == '%s@depth@0ms' % self.symbol:
             data = message['data']
@@ -314,7 +314,7 @@ class BinanceFutures:
         #     now = time.time()
         #     for order_id, order in self.open_orders_ws.items():
         #         if order['status'] != 'PENDING_NEW':
-        #             order['updateTime'] = now
+        #             order['updateTime'] = now * 1000
         #             order['status'] = 'CANCEL_ALL'
         return resp
 
