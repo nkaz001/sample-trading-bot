@@ -30,6 +30,9 @@ class BinanceFutures:
         self.last_price = 0
         self.open_orders_ws = {}
 
+    def open_orders_active(self):
+        return {order_id: order for order_id, order in self.open_orders_ws.items() if order['status'] in ['PENDING_NEW', 'NEW', 'PARTIALLY_FILLED']}
+
     async def __on_message(self, message):
         message = json.loads(message)
         logging.debug(message)
@@ -51,7 +54,7 @@ class BinanceFutures:
             elif e == 'ORDER_TRADE_UPDATE':
                 timestamp = data['E']
                 order = data['o']
-                self.open_orders_ws[order['c']] = {
+                order_ = {
                     'symbol': order['s'],
                     'clientOrderId': order['c'],
                     'side': order['S'],
@@ -63,8 +66,13 @@ class BinanceFutures:
                     'cumQty': order['z'],
                     'updateTime': order['T']
                 }
+                existing_order = self.open_orders_ws.setdefault(order['c'], order_)
+                if 'updateTime' not in existing_order or existing_order['updateTime'] < order_['updateTime']:
+                    existing_order.update(order_)
+                now = time.time()
                 for order_id, order in list(self.open_orders_ws.items()):
-                    if order['status'] not in ['PENDING_NEW', 'NEW', 'PARTIALLY_FILLED']:
+                    if order['status'] not in ['PENDING_NEW', 'NEW', 'PARTIALLY_FILLED'] \
+                            and order['updateTime'] < now - 300:
                         del self.open_orders_ws[order_id]
         elif stream == '%s@depth@0ms' % self.symbol:
             data = message['data']
@@ -144,7 +152,7 @@ class BinanceFutures:
                 url = URL('https://testnet.binancefuture.com/fapi%s?%s&signature=%s' % (path, query, signature), encoded=True)
             else:
                 url = URL('https://fapi.binance.com/fapi%s?%s&signature=%s' % (path, query, signature), encoded=True)
-            logging.info("sending req to %s: %s" % (url, json.dumps(query or query or '')))
+            logging.debug("sending req to %s: %s" % (url, json.dumps(query or query or '')))
             response = await self.client.request(verb, url, headers={'X-MBX-APIKEY': self.api_key}, timeout=timeout)
             # Make non-200s throw
             response.raise_for_status()
@@ -214,6 +222,40 @@ class BinanceFutures:
         self.retries = 0
         return await response.json()
 
+    async def get_symbol_info(self, symbol):
+        resp = await self.__curl_binancefutures(verb='GET', path='/v1/exchangeInfo')
+        for x in resp['symbols']:
+            if x['symbol'].upper() == symbol.upper():
+                return x
+
+    async def create_orders(self, order):
+        """Create a single order."""
+        order['newClientOrderId'] = self.orderIDPrefix + base64.b64encode(uuid.uuid4().bytes).decode('utf8').replace('+', '').replace('/', '').rstrip('=\n')
+        order['symbol'] = self.symbol
+        order['side'] = order['side'].upper()
+        order['type'] = 'LIMIT'
+        if self.postOnly:
+            order['timeInForce'] = 'GTX'
+        else:
+            order['timeInForce'] = 'GTC'
+        pending_order = order.copy()
+        pending_order['status'] = 'PENDING_NEW'
+        pending_order['clientOrderId'] = order['newClientOrderId']
+        self.open_orders_ws[order['newClientOrderId']] = pending_order
+        try:
+            resp = await self.__curl_binancefutures(verb='POST', path='/v1/order', query=order,
+                                                    max_retries=0)
+            order_id = resp['clientOrderId']
+            order = self.open_orders_ws[order_id]
+            if 'updateTime' not in order or order['updateTime'] < resp['updateTime']:
+                order.update(resp)
+            return resp
+        except (aiohttp.ClientResponseError, aiohttp.ClientConnectionError, asyncio.TimeoutError):
+            order = self.open_orders_ws.get(pending_order['newClientOrderId'])
+            if order is not None and order['status'] == 'PENDING_NEW':
+                del self.open_orders_ws[pending_order['newClientOrderId']]
+            raise
+
     async def create_bulk_orders(self, orders):
         """Create multiple orders."""
         if len(orders) > 5:
@@ -238,11 +280,9 @@ class BinanceFutures:
                                                     max_retries=0)
             for item in resp:
                 order_id = item['clientOrderId']
-                order = self.open_orders_ws.get(order_id)
-                if order is not None:
+                order = self.open_orders_ws[order_id]
+                if 'updateTime' not in order or order['updateTime'] < item['updateTime']:
                     order.update(item)
-                    if order['status'] not in ['PENDING_NEW', 'NEW', 'PARTIALLY_FILLED']:
-                        del self.open_orders_ws[order_id]
             return resp
         except (aiohttp.ClientResponseError, aiohttp.ClientConnectionError, asyncio.TimeoutError):
             for pending_order in pending_orders:
@@ -251,27 +291,31 @@ class BinanceFutures:
                     del self.open_orders_ws[pending_order['newClientOrderId']]
             raise
 
-    async def cancel_bulk_orders(self, orderIdList):
-        if len(orderIdList) > 10:
+    async def cancel_bulk_orders(self, origClientOrderIdList):
+        if len(origClientOrderIdList) > 10:
             raise Exception('The number of orders cannot exceed 10.')
         resp = await self.__curl_binancefutures(verb='DELETE', path='/v1/batchOrders',
-                                                query={'symbol': self.symbol, 'orderIdList': orderIdList},
+                                                query={'symbol': self.symbol, 'origClientOrderIdList': origClientOrderIdList},
                                                 max_retries=0)
         for item in resp:
+            if 'code' in item:
+                if item['code'] != -2011:
+                    logging.warning('cancel_bulk_orders: error response=%s' % str(item))
+                continue
             order_id = item['clientOrderId']
-            order = self.open_orders_ws.get(order_id)
-            if order is not None:
+            order = self.open_orders_ws[order_id]
+            if 'updateTime' not in order or order['updateTime'] < item['updateTime']:
                 order.update(item)
-                if order['status'] not in ['PENDING_NEW', 'NEW', 'PARTIALLY_FILLED']:
-                    del self.open_orders_ws[order_id]
         return resp
 
     async def cancel_all_orders(self):
         resp = await self.__curl_binancefutures(verb='DELETE', path='/v1/allOpenOrders', query={'symbol': self.symbol})
-        if resp['code'] == '200':
-            for order_id, order in list(self.open_orders_ws.items()):
-                if order['status'] != 'PENDING_NEW':
-                    del self.open_orders_ws[order_id]
+        # if resp['code'] == '200':
+        #     now = time.time()
+        #     for order_id, order in self.open_orders_ws.items():
+        #         if order['status'] != 'PENDING_NEW':
+        #             order['updateTime'] = now
+        #             order['status'] = 'CANCEL_ALL'
         return resp
 
     async def open_orders(self):

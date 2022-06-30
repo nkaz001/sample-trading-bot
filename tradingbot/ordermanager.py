@@ -20,29 +20,29 @@ def round_down(n, decimals=0):
 
 
 class OrderManager:
-
-    async def place_orders(self):
-        pass
-
     def restart(self):
         logging.info("Restarting the tradingbot...")
         os.execv(sys.executable, [sys.executable] + sys.argv)
 
-    async def converge_orders(self, buy_orders, sell_orders):
+    async def place_orders(self):
+        raise NotImplementedError
+
+    async def converge_orders(self, buy_orders, sell_orders, cancel_first=False):
         """Converge the orders we currently have in the book with what we want to be in the book.
            This involves amending any open orders and creating new ones if any have filled completely.
            We start from the closest orders outward."""
 
         # existing_orders = await self.binance_futures.open_orders()
-        # assert len(existing_orders) == len(self.binance_futures.open_orders_ws)
+        # ws_existing_orders = self.binance_futures.open_orders_active().values()
+        # assert len(existing_orders) == len(ws_existing_orders)
         # matched = 0
         # for order in existing_orders:
-        #     for ws_order in self.binance_futures.open_orders_ws.values():
+        #     for ws_order in ws_existing_orders:
         #         if order['clientOrderId'] == ws_order['clientOrderId']:
         #             matched += 1
         #             break
         # assert matched == len(existing_orders)
-        existing_orders = self.binance_futures.open_orders_ws.values()
+        existing_orders = self.binance_futures.open_orders_active().values()
 
         for order in buy_orders:
             order['price'] = str(order['price'])
@@ -52,19 +52,20 @@ class OrderManager:
             order['quantity'] = str(round_down(order['quantity'], 3))
 
         # Check all existing orders and match them up with what we want to place.
-        # If there's an open one, we might be able to amend it to fit what we want.
         for order in existing_orders:
             order["keep"] = False
             if order['side'] == 'BUY':
                 for i, buy_order in enumerate(buy_orders):
-                    if buy_order['price'] == order['price'] and abs((float(buy_order['price']) / float(order['price'])) - 1) <= settings.RELIST_INTERVAL:
+                    if round(float(buy_order['price']) / self.tick_size) == round(float(order['price']) / self.tick_size) \
+                            and abs((float(buy_order['price']) / float(order['price'])) - 1) <= settings.RELIST_INTERVAL:
                         # and buy_order['quantity'] == order['origQty']
                         order["keep"] = True
                         del buy_orders[i]
                         break
             else:
                 for i, sell_order in enumerate(sell_orders):
-                    if sell_order['price'] == order['price'] and abs((float(sell_order['price']) / float(order['price'])) - 1) <= settings.RELIST_INTERVAL:
+                    if round(float(sell_order['price']) / self.tick_size) == round(float(order['price']) / self.tick_size) \
+                            and abs((float(sell_order['price']) / float(order['price'])) - 1) <= settings.RELIST_INTERVAL:
                         # and sell_order['quantity'] == order['origQty']
                         order["keep"] = True
                         del sell_orders[i]
@@ -73,31 +74,39 @@ class OrderManager:
         to_create = [{'price': order['price'], 'quantity': order['quantity'], 'side': 'BUY'} for order in buy_orders] + \
             [{'price': order['price'], 'quantity': order['quantity'], 'side': 'SELL'} for order in sell_orders]
 
-        # Could happen if we exceed a delta limit
+        cancel_task = []
         if len(to_cancel) > 0:
             logging.info("Canceling %d orders:" % (len(to_cancel)))
             for order in reversed(to_cancel):
                 logging.info("%4s %s @ %s" % (order['side'], order['origQty'], order['price']))
-            cancel_task = []
             while to_cancel:
                 to_cancel_bulk = []
                 while to_cancel and len(to_cancel_bulk) < 10:
                     to_cancel_bulk.append(to_cancel.pop(0))
-                cancel_task.append(self.binance_futures.cancel_bulk_orders([x['orderId'] for x in to_cancel_bulk]))
-            response = await asyncio.gather(*cancel_task)
-            logging.debug(response)
+                cancel_task.append(self.binance_futures.cancel_bulk_orders([x['clientOrderId'] for x in to_cancel_bulk]))
 
+        create_task = []
         if len(to_create) > 0:
             logging.info("Creating %d orders:" % (len(to_create)))
             for order in reversed(to_create):
                 logging.info("%4s %s @ %s" % (order['side'], order['quantity'], order['price']))
-            create_task = []
             while to_create:
                 to_create_bulk = []
                 while to_create and len(to_create_bulk) < 5:
                     to_create_bulk.append(to_create.pop(0))
-                create_task.append(self.binance_futures.create_bulk_orders(to_create_bulk))
+                if len(to_create_bulk) < 5:
+                    for x in to_create_bulk:
+                        create_task.append(self.binance_futures.create_orders(x))
+                else:
+                    create_task.append(self.binance_futures.create_bulk_orders(to_create_bulk))
+
+        if cancel_first:
+            response = await asyncio.gather(*cancel_task)
+            logging.debug(response)
             response = await asyncio.gather(*create_task)
+            logging.debug(response)
+        else:
+            response = await asyncio.gather(*(cancel_task + create_task))
             logging.debug(response)
 
     ###
@@ -133,10 +142,17 @@ class OrderManager:
         ioloop = asyncio.get_event_loop()
 
         try:
-            self.binance_futures = BinanceFutures(settings.API_KEY, settings.API_SECRET, settings.SYMBOL, settings.TESTNET)
+            self.binance_futures = BinanceFutures(settings.API_KEY, settings.API_SECRET, settings.SYMBOL, settings.TESTNET, postOnly=settings.POST_ONLY)
             self.run = True
+            self.tick_size = None
 
             async def start():
+                symbol_info = await self.binance_futures.get_symbol_info(settings.SYMBOL)
+                for x in symbol_info['filters']:
+                    if 'tickSize' in x:
+                        self.tick_size = float(x['tickSize'])
+                if self.tick_size is None:
+                    raise Exception('No symbol information.')
                 asyncio.create_task(self.binance_futures.connect())
                 while self.run:
                     # sys.stdout.write("-----\n")
