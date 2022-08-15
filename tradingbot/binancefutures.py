@@ -36,45 +36,43 @@ class BinanceFutures:
     async def __on_message(self, message):
         message = json.loads(message)
         logging.debug(message)
-        stream = message['stream']
-        if self.listen_key == stream:
-            data = message['data']
-            e = data['e']
-            if e == 'listenKeyExpired':
-                logging.warning('Listen key is expired.')
-                await self.ws.close()
-            elif e == 'ACCOUNT_UPDATE':
-                account = data['a']
-                positions = account['P']
-                for position in positions:
-                    position_side = position['ps']
-                    if 'BOTH' == position_side:
-                        if position['s'].upper() == self.symbol.upper():
-                            self.running_qty = position['pa']
-            elif e == 'ORDER_TRADE_UPDATE':
-                timestamp = data['E']
-                order = data['o']
-                order_ = {
-                    'symbol': order['s'],
-                    'clientOrderId': order['c'],
-                    'side': order['S'],
-                    'origQty': order['q'],
-                    'price': order['p'],
-                    'status': order['X'],
-                    'orderId': order['i'],
-                    'executedQty': order['l'],
-                    'cumQty': order['z'],
-                    'updateTime': order['T']
-                }
-                existing_order = self.open_orders_ws.setdefault(order['c'], order_)
-                if 'updateTime' not in existing_order or existing_order['updateTime'] < order_['updateTime']:
-                    existing_order.update(order_)
-                now = time.time()
-                for order_id, order in list(self.open_orders_ws.items()):
-                    if order['status'] not in ['PENDING_NEW', 'NEW', 'PARTIALLY_FILLED'] \
-                            and order['updateTime'] < (now - 300) * 1000:
-                        del self.open_orders_ws[order_id]
-        elif stream == '%s@depth@0ms' % self.symbol:
+        data = message['data']
+        evt = data['e']
+        if evt == 'listenKeyExpired':
+            logging.warning('Listen key is expired.')
+            await self.ws.close()
+        elif evt == 'ACCOUNT_UPDATE':
+            account = data['a']
+            positions = account['P']
+            for position in positions:
+                position_side = position['ps']
+                if 'BOTH' == position_side:
+                    if position['s'].upper() == self.symbol.upper():
+                        self.running_qty = position['pa']
+        elif evt == 'ORDER_TRADE_UPDATE':
+            # timestamp = data['E']
+            order = data['o']
+            order_ = {
+                'symbol': order['s'],
+                'clientOrderId': order['c'],
+                'side': order['S'],
+                'origQty': order['q'],
+                'price': order['p'],
+                'status': order['X'],
+                'orderId': order['i'],
+                'executedQty': order['l'],
+                'cumQty': order['z'],
+                'updateTime': order['T']
+            }
+            existing_order = self.open_orders_ws.setdefault(order['c'], order_)
+            if 'updateTime' not in existing_order or existing_order['updateTime'] < order_['updateTime']:
+                existing_order.update(order_)
+            now = time.time()
+            for order_id, order in list(self.open_orders_ws.items()):
+                if order['status'] not in ['PENDING_NEW', 'NEW', 'PARTIALLY_FILLED'] \
+                        and order['updateTime'] < (now - 300) * 1000:
+                    del self.open_orders_ws[order_id]
+        elif evt == 'depthUpdate':
             data = message['data']
             u = data['u']
             pu = data['pu']
@@ -96,7 +94,13 @@ class BinanceFutures:
                 else:
                     self.depth[price] = -float(qty)
             self.prev_u = u
-        elif stream == '%s@aggTrade' % self.symbol:
+        elif evt == 'aggTrade':
+            data = message['data']
+            price = data['p']
+            qty = data['q']
+            self.last_price = price
+            self.last_qty = qty
+        elif evt == 'trade':
             data = message['data']
             price = data['p']
             qty = data['q']
@@ -343,9 +347,11 @@ class BinanceFutures:
             self.running_qty = await self.open_position()
             self.listen_key = await self.open_user_data_stream()
             if self.testnet:
-                url = 'wss://stream.binancefuture.com/stream?streams=%s/%s/%s' % (self.listen_key, '%s@depth@0ms' % self.symbol, '%s@aggTrade' % self.symbol)
+                # url = 'wss://stream.binancefuture.com/stream?streams=%s/%s/%s' % (self.listen_key, '%s@depth@0ms' % self.symbol, '%s@aggTrade' % self.symbol)
+                url = 'wss://stream.binancefuture.com/stream?streams=%s/%s/%s' % (self.listen_key, '%s@depth@0ms' % self.symbol, '%s@trade' % self.symbol)
             else:
-                url = 'wss://fstream.binance.com/stream?streams=%s/%s/%s' % (self.listen_key, '%s@depth@0ms' % self.symbol, '%s@aggTrade' % self.symbol)
+                # url = 'wss://fstream.binance.com/stream?streams=%s/%s/%s' % (self.listen_key, '%s@depth@0ms' % self.symbol, '%s@aggTrade' % self.symbol)
+                url = 'wss://fstream.binance.com/stream?streams=%s/%s/%s' % (self.listen_key, '%s@depth@0ms' % self.symbol, '%s@trade' % self.symbol)
             async with ClientSession() as session:
                 async with session.ws_connect(url) as ws:
                     logging.info('WS Connected.')
