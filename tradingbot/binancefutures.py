@@ -29,6 +29,7 @@ class BinanceFutures:
         self.orderIDPrefix = orderIDPrefix
         self.last_price = 0
         self.open_orders_ws = {}
+        self.retries = 0  # initialize counter
 
     def open_orders_active(self):
         return {order_id: order for order_id, order in self.open_orders_ws.items() if order['status'] in ['PENDING_NEW', 'NEW', 'PARTIALLY_FILLED']}
