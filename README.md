@@ -1,3 +1,5 @@
+# Project moved to https://github.com/nkaz001/hftbacktest/tree/master/rust
+
 # Binance Futures Sample Trading Bot 
 
 Run custom_strategy.py
